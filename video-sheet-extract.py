@@ -647,7 +647,7 @@ def main():
 
     ap.add_argument("--dpi", type=int, default=300)
     ap.add_argument("--margins", type=str, default="15:15:10:10")
-    ap.add_argument("--gap-ratio", type=float, default=0.02)
+    ap.add_argument("--gap-ratio", type=float, default=0.005)
     ap.add_argument("--no-justify", action="store_true")
     ap.add_argument("--percentile", type=str, default="0.5:99.5")
     ap.add_argument("--sharpen", type=float, default=1.2)
