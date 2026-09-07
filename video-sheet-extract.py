@@ -10,6 +10,7 @@ import argparse
 import os
 import sys
 import shutil
+import subprocess
 import time
 
 import cv2
@@ -323,8 +324,54 @@ def auto_detect_crop(cap, start_frame, end_frame, samples=30, pad_ratio=0.02):
         return None
     x0, x1 = int(xs.min()), int(xs.max())
     y0, y1 = int(ys.min()), int(ys.max())
+
+    region = freq_map[y0:y1+1, x0:x1+1]
+    row_avg = region.mean(axis=1)
+    col_avg = region.mean(axis=0)
+
+    pos_rows = row_avg[row_avg > 0]
+    pos_cols = col_avg[col_avg > 0]
+    if len(pos_rows) > 0:
+        edge_thresh = max(0.15, float(np.percentile(pos_rows, 20)))
+    else:
+        edge_thresh = 0.15
+
+    orig_h = y1 - y0 + 1
+    orig_w = x1 - x0 + 1
+
+    valid_rows = np.where(row_avg > edge_thresh)[0]
+    valid_cols = np.where(col_avg > edge_thresh)[0]
+    if len(valid_rows) > 0:
+        new_y0 = y0 + int(valid_rows[0])
+        new_y1 = y0 + int(valid_rows[-1])
+        if (new_y1 - new_y0 + 1) >= orig_h * 0.5:
+            y0, y1 = new_y0, new_y1
+    if len(valid_cols) > 0:
+        new_x0 = x0 + int(valid_cols[0])
+        new_x1 = x0 + int(valid_cols[-1])
+        if (new_x1 - new_x0 + 1) >= orig_w * 0.5:
+            x0, x1 = new_x0, new_x1
+
     pad_x = int((x1 - x0) * pad_ratio)
     pad_y = int((y1 - y0) * pad_ratio)
+
+    if pad_y > 0 and y0 - pad_y >= 0:
+        top_band = freq_map[y0 - pad_y:y0, x0:x1 + 1]
+        if top_band.mean() < edge_thresh:
+            pad_y = 0
+    if pad_y > 0 and y1 + pad_y < h0:
+        bot_band = freq_map[y1 + 1:y1 + 1 + pad_y, x0:x1 + 1]
+        if bot_band.mean() < edge_thresh:
+            pad_y = 0
+    if pad_x > 0 and x0 - pad_x >= 0:
+        left_band = freq_map[y0:y1 + 1, x0 - pad_x:x0]
+        if left_band.mean() < edge_thresh:
+            pad_x = 0
+    if pad_x > 0 and x1 + pad_x < w0:
+        right_band = freq_map[y0:y1 + 1, x1 + 1:x1 + 1 + pad_x]
+        if right_band.mean() < edge_thresh:
+            pad_x = 0
+
     x0 = max(0, x0 - pad_x); y0 = max(0, y0 - pad_y)
     x1 = min(w0 - 1, x1 + pad_x); y1 = min(h0 - 1, y1 + pad_y)
     return x0, y0, x1 - x0 + 1, y1 - y0 + 1
@@ -635,7 +682,40 @@ def main():
 
     # ---- [1/8] 打开视频 ----
     print("[1/8] 打开视频...")
-    cap = cv2.VideoCapture(args.video)
+
+    def detect_codec(path):
+        try:
+            for p in [r"C:\Tools\ffmpeg\ffmpeg.exe", "ffprobe"]:
+                cmd = [p, "-v", "quiet", "-show_streams", "-select_streams", "v:0", "-i", path]
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                for line in (r.stdout + r.stderr).splitlines():
+                    if "codec_name=" in line:
+                        return line.split("codec_name=")[1].strip()
+        except Exception:
+            pass
+        return None
+
+    video_path = args.video
+    codec = detect_codec(video_path)
+    converted_path = None
+    if codec and "av1" in codec.lower():
+        converted_path = os.path.splitext(video_path)[0] + "_h264_tmp.mp4"
+        print(f"  检测到 AV1 编码，正在转为 H.264 以加速读取...")
+        ffmpeg_bin = r"C:\Tools\ffmpeg\ffmpeg.exe"
+        if not os.path.exists(ffmpeg_bin):
+            ffmpeg_bin = "ffmpeg"
+        cmd = [ffmpeg_bin, "-y", "-i", video_path,
+               "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+               "-an", converted_path]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0 and os.path.exists(converted_path):
+            print(f"  转换完成: {converted_path}")
+            video_path = converted_path
+        else:
+            print(f"  转换失败，使用原始文件继续: {r.stderr[:200]}")
+            converted_path = None
+
+    cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"错误: 无法打开视频 {args.video}")
         sys.exit(1)
@@ -886,6 +966,10 @@ def main():
         print(f"临时文件夹已删除: {out_dir}")
     else:
         print(f"临时文件保留在: {out_dir}")
+
+    if converted_path and os.path.exists(converted_path):
+        os.remove(converted_path)
+        print(f"  已清理 H.264 临时文件: {converted_path}")
 
     total_elapsed = time.time() - t_total_start
     print(f"完成，总耗时 {total_elapsed:.1f}s。")
